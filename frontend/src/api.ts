@@ -51,6 +51,10 @@ export interface NovelSearchResult {
   id: string // Backend search returns string ID
   title: string
   author: string
+  cover: string | null // 封面图片URL
+  description: string | null // 小说简介
+  category: string | null // 分类标签
+  score: string | null // 评分
 }
 
 export interface NovelSearchResponse {
@@ -59,6 +63,7 @@ export interface NovelSearchResponse {
 
 export interface AddNovelRequest {
   novel_id: string // Input expects string
+  max_chapters?: number // Optional: limit chapters to download (e.g. 10 for preview)
 }
 
 // Matches DownloadTask.to_dict() structure in backend
@@ -193,18 +198,11 @@ const apiClient: AxiosInstance = axios.create({
   baseURL: '/api', // Base URL is /api
 })
 
-// --- JWT Interceptor (HTTP API) ---
+// --- JWT Interceptor (HTTP API) - DISABLED for internal API mode ---
+// No authentication token needed for internal API
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig): InternalAxiosRequestConfig => {
-    const publicPaths = ['/auth/login', '/auth/register']
-    const isPublicPath = !!config.url && publicPaths.includes(config.url)
-    if (!isPublicPath) {
-      const token = localStorage.getItem('accessToken')
-      if (token) {
-        config.headers = config.headers ?? {}
-        config.headers.Authorization = `Bearer ${token}`
-      }
-    }
+    // Internal API mode - no token required, skip all authentication
     return config
   },
   (error) => Promise.reject(error),

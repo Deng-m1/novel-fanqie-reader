@@ -16,6 +16,7 @@ from tqdm import tqdm
 from typing import List, Dict, Optional, Tuple, Callable
 
 from .network import NetworkClient
+from .proxy_downloader import ProxyChapterDownloader
 from ..offical_tools.downloader import download_chapter_official, spawn_iid
 from ..offical_tools.epub_downloader import fetch_chapter_for_epub
 from ..book_parser.book_manager import BookManager
@@ -68,11 +69,15 @@ class ChapterDownloader:
         except ValueError:  # Cannot set SIGINT handler in non-main thread
             pass
 
-        self.api_manager = APIManager(
-            api_endpoints=self.config.api_endpoints,
-            config=self.config,
-            network_status=self.network._api_status,
-        )
+        # Only initialize APIManager if we have endpoints and not using proxy API
+        if self.config.api_endpoints and not (hasattr(self.config, 'use_proxy_api') and self.config.use_proxy_api):
+            self.api_manager = APIManager(
+                api_endpoints=self.config.api_endpoints,
+                config=self.config,
+                network_status=self.network._api_status,
+            )
+        else:
+            self.api_manager = None
 
     def _handle_signal(self, signum, frame):
         self.logger.warning("Received Ctrl-C, preparing graceful exit...")
@@ -125,9 +130,21 @@ class ChapterDownloader:
             self.logger.info(f"No chapters to download for '{book_name}'.")
             return results  # Return early if nothing to do
 
-        if self.config.use_official_api:
-            groups = [to_download[i : i + 10] for i in range(0, len(to_download), 10)]
-            max_workers = self.config.max_workers
+        # 优先使用代理API模式
+        if hasattr(self.config, 'use_proxy_api') and self.config.use_proxy_api:
+            self.logger.info(f"Using Proxy API mode for download")
+            max_workers = min(self.config.max_workers, tasks_count)
+            max_workers = max(1, max_workers)
+            
+            def get_submit(exe):
+                return {exe.submit(self._download_proxy, ch): ch for ch in to_download}
+            
+            desc = f"Downloading '{book_name}' (Proxy API)"
+        elif self.config.use_official_api:
+            # 改为单章下载模式，提高稳定性
+            batch_size = 1  # 一次下载一章，避免批量API限流问题
+            groups = [to_download[i : i + batch_size] for i in range(0, len(to_download), batch_size)]
+            max_workers = min(self.config.max_workers, tasks_count)  # 限制并发数
 
             def get_submit(exe):
                 return {
@@ -137,9 +154,15 @@ class ChapterDownloader:
 
             desc = f"Downloading '{book_name}' (Official Batch)"
         else:
-            max_workers = min(
-                self.config.max_workers, len(self.config.api_endpoints), tasks_count
-            )  # Avoid more workers than tasks
+            # For single-chapter mode, ensure max_workers is at least 1
+            # If api_endpoints is configured, limit by its length
+            if self.config.api_endpoints:
+                max_workers = min(
+                    self.config.max_workers, len(self.config.api_endpoints), tasks_count
+                )
+            else:
+                max_workers = min(self.config.max_workers, tasks_count)
+            max_workers = max(1, max_workers)  # Ensure at least 1 worker
 
             def get_submit(exe):
                 return {exe.submit(self._download_single, ch): ch for ch in to_download}
@@ -161,7 +184,11 @@ class ChapterDownloader:
                     task_info = futures[future]  # chapter dict or list of chapter dicts
                     batch_success_count = 0
                     try:
-                        if self.config.use_official_api:
+                        # 判断是否为官方API批量模式
+                        is_official_batch = (self.config.use_official_api and 
+                                           not (hasattr(self.config, 'use_proxy_api') and self.config.use_proxy_api))
+                        
+                        if is_official_batch:
                             batch_out: Dict[str, Tuple[str, str]] = future.result()
                             for cid, chapter_result in batch_out.items():
                                 if (
@@ -258,8 +285,11 @@ class ChapterDownloader:
                             )
                             results["failed"] += 1
 
+                    # 更新进度条
+                    is_proxy_or_single = (hasattr(self.config, 'use_proxy_api') and self.config.use_proxy_api) or \
+                                        (not self.config.use_official_api)
                     pbar.update(
-                        1 if not self.config.use_official_api else len(task_info)
+                        1 if is_proxy_or_single else len(task_info)
                     )  # Update pbar correctly
 
             finally:
@@ -442,6 +472,13 @@ class ChapterDownloader:
         )
         return "Error: Max Retries", chapter_title
 
+    def _download_proxy(self, chapter: dict) -> Tuple[str, str]:
+        """使用代理API下载单个章节"""
+        proxy_downloader = ProxyChapterDownloader()
+        chapter_id = chapter["id"]
+        chapter_title = chapter.get("title") or f"Chapter {chapter_id}"
+        return proxy_downloader.download_chapter(chapter_id, chapter_title)
+    
     def _download_official_batch(
         self, chapters: List[dict]
     ) -> Dict[str, Tuple[str, str]]:

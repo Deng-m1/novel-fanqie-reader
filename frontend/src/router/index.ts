@@ -45,13 +45,11 @@ const routes: Array<RouteRecordRaw> = [
         path: '/upload',
         name: 'Upload',
         component: () => import('../views/UploadView.vue'),
-        meta: { requiresAuth: true },
       },
       {
         path: '/tasks',
         name: 'Tasks',
         component: () => import('../views/TasksView.vue'),
-        meta: { requiresAuth: true },
       },
     ],
   },
@@ -73,24 +71,18 @@ const router = createRouter({
   routes,
 })
 
-// 全局前置守卫
-router.beforeEach((to, from, next) => {
-  const authStore = useAuthStore()
-
-  // 检查路由是否需要身份验证
-  if (to.matched.some((record) => record.meta.requiresAuth)) {
-    // 如果未登录，重定向到登录页
-    if (!authStore.isAuthenticated) {
-      next({
-        path: '/auth',
-        query: { redirect: to.fullPath },
-      })
-    } else {
-      next()
-    }
-  } else {
-    next()
-  }
-})
+// Authentication guard disabled for internal API mode
+// router.beforeEach((to, from, next) => {
+//   const authStore = useAuthStore()
+//   if (to.matched.some((record) => record.meta.requiresAuth)) {
+//     if (!authStore.isAuthenticated) {
+//       next({ path: '/auth', query: { redirect: to.fullPath } })
+//     } else {
+//       next()
+//     }
+//   } else {
+//     next()
+//   }
+// })
 
 export default router

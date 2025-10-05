@@ -46,6 +46,7 @@ class Config(BaseConfig):
 
     # API config... (keep existing fields)
     use_official_api: bool = Field(default=True, description="使用官方API")
+    use_proxy_api: bool = Field(default=False, description="使用代理API（推荐）")
     iid: str = Field(default="", description="自动生成")
     iid_spawn_time: str = Field(default="", description="iid生成时间戳")
     api_endpoints: list = Field(

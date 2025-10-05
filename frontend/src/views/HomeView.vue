@@ -7,22 +7,7 @@
           <h1>小说管理系统</h1>
         </div>
         <div class="user-info">
-          <template v-if="authStore.isAuthenticated">
-            <el-dropdown @command="handleCommand">
-              <span class="user-dropdown">
-                {{ authStore.user?.username }}
-                <el-icon><arrow-down /></el-icon>
-              </span>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="logout">退出登录</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-          <template v-else>
-            <el-button type="primary" @click="router.push('/auth')">登录/注册</el-button>
-          </template>
+          <span class="internal-mode-badge">内部API模式</span>
         </div>
       </el-header>
 
@@ -75,64 +60,14 @@ const taskStore = useTaskStore()
 
 const activeMenu = computed(() => route.path)
 
-// 处理用户下拉菜单命令
-const handleCommand = (command: string) => {
-  if (command === 'logout') {
-    ElMessageBox.confirm('确定要退出登录吗？', '提示', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-      .then(() => {
-        authStore.logout()
-
-        // 断开WebSocket连接
-        if (api.WebSocketAPI.isConnected()) {
-          api.WebSocketAPI.disconnect()
-        }
-
-        ElMessage.success('已退出登录')
-        router.push('/auth')
-      })
-      .catch(() => {})
-  }
-}
-
-// 设置 WebSocket 连接
-const setupWebSocketConnection = () => {
-  const token = localStorage.getItem('accessToken')
-  if (!token) return
-
-  // 设置 WebSocket 连接以获取任务更新
-  taskStore.setupWebSocketListener()
-
-  console.log('WebSocket connection established in main app')
-}
+// Internal API mode - no authentication required
+// Authentication and WebSocket connection code removed
+// All API calls will work without tokens
 
 onMounted(() => {
-  // 检查是否已登录
-  authStore.checkAuth()
-
-  // 如果已登录，设置WebSocket连接
-  if (authStore.isAuthenticated) {
-    setupWebSocketConnection()
-  }
+  // In internal API mode, no authentication check needed
+  console.log('Running in internal API mode - no authentication')
 })
-
-// 监听认证状态变化
-watch(
-  () => authStore.isAuthenticated,
-  (isAuthenticated) => {
-    if (isAuthenticated) {
-      setupWebSocketConnection()
-    } else {
-      // 如果用户登出，断开WebSocket连接
-      if (api.WebSocketAPI.isConnected()) {
-        api.WebSocketAPI.disconnect()
-      }
-    }
-  },
-)
 </script>
 
 <style scoped>
@@ -178,5 +113,14 @@ watch(
 
 .user-dropdown .el-icon {
   margin-left: 5px;
+}
+
+.internal-mode-badge {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
 }
 </style>

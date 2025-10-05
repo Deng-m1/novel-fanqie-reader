@@ -220,12 +220,17 @@ export const useNovelStore = defineStore('novel', {
       }
     },
 
-    async addNovel(novelId: string): Promise<{ task_id: string } | null> {
+    async addNovel(novelId: string, maxChapters?: number): Promise<{ task_id: string } | null> {
       this.isLoading = true
       this.error = null
 
       try {
-        const response = await api.Novels.add({ novel_id: novelId })
+        const requestData: { novel_id: string; max_chapters?: number } = { novel_id: novelId }
+        if (maxChapters !== undefined) {
+          requestData.max_chapters = maxChapters
+        }
+        
+        const response = await api.Novels.add(requestData)
 
         if ('error' in response) {
           this.error = response.error

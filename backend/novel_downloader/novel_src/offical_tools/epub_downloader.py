@@ -56,6 +56,7 @@ def fetch_chapter_for_epub(chapter_ids: str) -> Dict:
     返回结构: {"data": {id: {...}, ...}}
     """
     cfg = GlobalContext.get_config()
+    logger = GlobalContext.get_logger()
     _ensure_fresh_iid()
     # chapter_ids 已经是 'id1,id2,...' 格式
     ids_str = chapter_ids
@@ -67,11 +68,24 @@ def fetch_chapter_for_epub(chapter_ids: str) -> Dict:
         aid=AID,
         update_version_code=GetVersionCode.get(),
     )
+    
+    # 打印详细的请求信息
+    logger.info(f"=== Official API Request Details ===")
+    logger.info(f"Chapter IDs: {ids_str}")
+    logger.info(f"Install ID (IID): {cfg.iid}")
+    logger.info(f"Server Device ID: {str(int(cfg.iid) - 4096)}")
+    logger.info(f"AID: {AID}")
+    logger.info(f"Version Code: {GetVersionCode.get()}")
+    logger.info(f"API Base URL: {API_BASE_URL}")
+    
     fq = FqReq(fq_var)
     try:
         # step1: 干净正文 → 批量请求，解密
+        logger.info(f"Requesting batch_full API...")
         clean = fq._batch_fetch(ids_str)
+        logger.info(f"Batch fetch successful, decrypting...")
         clean = fq._decrypt_contents(clean)
+        logger.info(f"Decryption successful, chapters in response: {list(clean.get('data', {}).keys())}")
 
         # 获取所有章节 ID 列表
         id_list = list(clean.get("data", {}).keys())

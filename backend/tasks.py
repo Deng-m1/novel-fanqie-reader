@@ -101,17 +101,24 @@ def _update_db_task_status(
 # --- Download and Process Task ---
 @celery_app.task(bind=True, name="tasks.process_novel")
 def process_novel_task(
-    self, novel_id: int, user_id: int, db_task_id: int
+    self, novel_id: int, user_id: int, db_task_id: int, max_chapters: int = None
 ) -> Dict[str, Any]:
     """
     Celery task to download, process, and save a novel's chapters and metadata.
     Updates the corresponding DownloadTask record in the database.
+    
+    Args:
+        novel_id: ID of the novel to process
+        user_id: ID of the user requesting the download
+        db_task_id: ID of the DownloadTask record
+        max_chapters: Optional limit on number of chapters to download (e.g., 10 for preview)
     """
     # Use Flask logger if available, otherwise use standard logger
     logger = current_app.logger if current_app else logging.getLogger("celery.tasks")
     celery_task_id = self.request.id
     logger.info(
-        f"Celery Task {celery_task_id}: Starting processing for Novel ID: {novel_id}, User ID: {user_id}, DB Task ID: {db_task_id}"
+        f"Celery Task {celery_task_id}: Starting processing for Novel ID: {novel_id}, User ID: {user_id}, DB Task ID: {db_task_id}" + 
+        (f" (max_chapters: {max_chapters})" if max_chapters else "")
     )
 
     # Initial status update
@@ -298,7 +305,15 @@ def process_novel_task(
         if chapters_list is None:
             raise ValueError(f"Failed to fetch chapter list for ID {novel_id}.")
         total_chapters_src = len(chapters_list)
-        logger.info(f"Task {celery_task_id}: Found {total_chapters_src} chapters.")
+        
+        # 如果指定了 max_chapters，限制下载章节数量（用于预览模式）
+        if max_chapters is not None and max_chapters > 0:
+            original_count = total_chapters_src
+            chapters_list = chapters_list[:max_chapters]
+            total_chapters_src = len(chapters_list)
+            logger.info(f"Task {celery_task_id}: Limited to {total_chapters_src} chapters (from {original_count}) for preview mode.")
+        else:
+            logger.info(f"Task {celery_task_id}: Found {total_chapters_src} chapters.")
 
         # --- REVOCATION CHECK START ---
         if self.request.delivery_info.get("is_revoked"):

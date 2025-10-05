@@ -79,8 +79,14 @@ class Settings:
     NOVEL_NOVEL_FORMAT = os.getenv("NOVEL_FORMAT", "epub").lower()
     NOVEL_BULK_FILES = os.getenv("NOVEL_BULK_FILES", "False").lower() == "true"
     NOVEL_AUTO_CLEAR_DUMP = os.getenv("NOVEL_AUTO_CLEAR", "True").lower() == "true"
+    # Proxy API Mode (推荐使用)
+    NOVEL_USE_PROXY_API = (
+        os.getenv("NOVEL_USE_PROXY_API", "True").lower() == "true"
+    )
+    
+    # Official API (已失效)
     NOVEL_USE_OFFICIAL_API = (
-        os.getenv("NOVEL_USE_OFFICIAL_API", "True").lower() == "true"
+        os.getenv("NOVEL_USE_OFFICIAL_API", "False").lower() == "true"
     )
     NOVEL_IID = os.getenv("NOVEL_IID", "")  # Allow setting via env if needed
     NOVEL_IID_SPAWN_TIME = os.getenv("NOVEL_IID_SPAWN_TIME", "")
@@ -129,6 +135,7 @@ def get_downloader_config():
         "novel_format": settings.NOVEL_NOVEL_FORMAT,
         "bulk_files": settings.NOVEL_BULK_FILES,
         "auto_clear_dump": settings.NOVEL_AUTO_CLEAR_DUMP,
+        "use_proxy_api": settings.NOVEL_USE_PROXY_API,  # 代理模式
         "use_official_api": settings.NOVEL_USE_OFFICIAL_API,
         "api_endpoints": settings.NOVEL_API_ENDPOINTS,
         "iid": settings.NOVEL_IID,  # Pass these through

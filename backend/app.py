@@ -4,6 +4,7 @@ import sys
 import os
 import re
 from datetime import datetime
+from typing import Optional
 
 from flask import Flask, request, jsonify, send_file, current_app, abort
 from flask_jwt_extended import (
@@ -228,14 +229,65 @@ def emit_task_update(user_id: int, task_data: dict):
 
 
 # --- API Endpoints ---
+def _download_cover_from_url(cover_url: str, novel_id: str, book_name: str) -> Optional[str]:
+    """下载封面图片到本地
+    
+    Args:
+        cover_url: 封面图片URL
+        novel_id: 小说ID
+        book_name: 小说名称
+        
+    Returns:
+        本地封面URL或None
+    """
+    if not cover_url:
+        return None
+        
+    try:
+        import requests
+        from pathlib import Path
+        
+        logger = current_app.logger
+        cfg = GlobalContext.get_config()
+        
+        # 获取状态文件夹路径
+        status_folder = cfg.status_folder_path(book_name, novel_id)
+        status_folder.mkdir(parents=True, exist_ok=True)
+        
+        # 安全文件名
+        safe_book_name = re.sub(r'[\\/*?:"<>|]', "_", book_name)
+        cover_path = status_folder / f"{safe_book_name}.jpg"
+        
+        # 如果已存在，直接返回
+        if cover_path.exists():
+            return f"/api/novels/{novel_id}/cover"
+        
+        # 下载封面
+        response = requests.get(cover_url, timeout=10, verify=False)
+        response.raise_for_status()
+        
+        # 保存封面
+        cover_path.write_bytes(response.content)
+        logger.info(f"Downloaded cover for novel {novel_id} from {cover_url}")
+        
+        return f"/api/novels/{novel_id}/cover"
+        
+    except Exception as e:
+        current_app.logger.warning(f"Failed to download cover for {novel_id}: {e}")
+        return None
+
+
 @app.route("/api/search", methods=["GET"])
-@jwt_required()
 def search_novels_api():
     logger = current_app.logger
     query = request.args.get("query")
     if not query:
         return jsonify(error="Missing 'query' parameter"), 400
-    logger.info(f"Search request: '{query}'")
+    
+    # 新参数: 是否预下载封面 (默认关闭以提升响应速度)
+    preload_covers = request.args.get("preload_covers", "false").lower() == "true"
+    
+    logger.info(f"Search request: '{query}' (preload_covers={preload_covers})")
 
     if not DOWNLOADER_AVAILABLE:
         logger.error("Downloader components unavailable for search.")
@@ -252,6 +304,49 @@ def search_novels_api():
         search_results = network_client.search_book(query)
         logger.info(f"Search for '{query}' returned {len(search_results)} results.")
 
+        # 获取所有搜索结果的ID
+        search_ids = [res.get("book_id") for res in search_results if res.get("book_id")]
+        
+        # 从数据库查询已存在的小说封面
+        existing_novels = {}
+        if search_ids:
+            novels_in_db = Novel.query.filter(Novel.id.in_(search_ids)).all()
+            existing_novels = {
+                str(novel.id): novel.cover_image_url 
+                for novel in novels_in_db 
+                if novel.cover_image_url
+            }
+            logger.debug(f"Found {len(existing_novels)} novels with local covers")
+
+        # 预下载封面图片
+        if preload_covers:
+            downloaded_count = 0
+            for res in search_results:
+                book_id = res.get("book_id")
+                if not book_id or str(book_id) in existing_novels:
+                    continue  # 已有本地封面，跳过
+                
+                thumb_url = res.get("thumb_url")
+                if thumb_url:
+                    title = res.get("title") or f"Novel {book_id}"
+                    local_cover = _download_cover_from_url(thumb_url, str(book_id), title)
+                    if local_cover:
+                        existing_novels[str(book_id)] = local_cover
+                        downloaded_count += 1
+                        
+                        # 更新数据库（如果小说已存在）
+                        try:
+                            novel = Novel.query.get(int(book_id))
+                            if novel:
+                                novel.cover_image_url = local_cover
+                                _db.session.commit()
+                        except Exception as db_err:
+                            logger.warning(f"Failed to update cover in DB for {book_id}: {db_err}")
+                            _db.session.rollback()
+            
+            if downloaded_count > 0:
+                logger.info(f"Pre-downloaded {downloaded_count} covers for search results")
+
         formatted_results = [
             {
                 "id": str(res.get("book_id"))
@@ -259,6 +354,11 @@ def search_novels_api():
                 else None,
                 "title": res.get("title"),
                 "author": res.get("author"),
+                # 优先使用本地封面，如果不存在则使用番茄API返回的URL
+                "cover": existing_novels.get(str(res.get("book_id"))) or res.get("thumb_url"),
+                "description": res.get("abstract"),  # 小说简介
+                "category": res.get("category"),  # 分类
+                "score": res.get("score"),  # 评分
             }
             for res in search_results
             if res.get("book_id") is not None  # Ensure ID exists and is string
@@ -270,10 +370,9 @@ def search_novels_api():
 
 
 @app.route("/api/novels", methods=["POST"])
-@jwt_required()
 def add_novel_and_crawl():
     logger = current_app.logger
-    user_id = int(get_jwt_identity())
+    user_id = 1  # Fixed user ID for internal API
     data = request.get_json()
     if not data or "novel_id" not in data:
         return jsonify(error="Missing 'novel_id' in request body"), 400
@@ -283,7 +382,18 @@ def add_novel_and_crawl():
     except (ValueError, TypeError):
         return jsonify(error="'novel_id' must be a valid integer"), 400
 
-    logger.info(f"User {user_id} requested add/crawl for novel ID: {novel_id_int}")
+    # 可选参数: max_chapters 用于限制下载章节数量（如预览模式）
+    max_chapters = data.get("max_chapters", None)
+    if max_chapters is not None:
+        try:
+            max_chapters = int(max_chapters)
+            if max_chapters < 1:
+                return jsonify(error="'max_chapters' must be a positive integer"), 400
+        except (ValueError, TypeError):
+            return jsonify(error="'max_chapters' must be a valid integer"), 400
+
+    logger.info(f"User {user_id} requested add/crawl for novel ID: {novel_id_int}" + 
+                (f" (max_chapters: {max_chapters})" if max_chapters else ""))
 
     db_task_id = None
     try:
@@ -340,13 +450,18 @@ def add_novel_and_crawl():
         return jsonify(error="Failed to prepare task record in database"), 500
 
     try:
+        # 准备任务参数
+        task_kwargs = {
+            "novel_id": novel_id_int,
+            "user_id": user_id,
+            "db_task_id": db_task_id,
+        }
+        if max_chapters is not None:
+            task_kwargs["max_chapters"] = max_chapters
+
         celery_task = celery_app.send_task(
             "tasks.process_novel",
-            kwargs={
-                "novel_id": novel_id_int,
-                "user_id": user_id,
-                "db_task_id": db_task_id,
-            },
+            kwargs=task_kwargs,
         )
         logger.info(f"Queued Celery task {celery_task.id} for DB Task {db_task_id}")
 
@@ -369,18 +484,101 @@ def add_novel_and_crawl():
 
 
 @app.route("/api/novels", methods=["GET"])
-@jwt_required()
 def list_novels():
+    """
+    List novels with filtering, search and sorting.
+    
+    Query Parameters:
+    - page: Page number (default: 1)
+    - per_page: Items per page (default: 10, max: 50)
+    - search: Search by title (partial match, case-insensitive)
+    - tags: Filter by tags (comma-separated, e.g., "玄幻,都市")
+    - status: Filter by status (e.g., "连载中", "已完结")
+    - sort: Sort field (last_crawled_at, created_at, total_chapters, title)
+    - order: Sort order (asc, desc) - default: desc
+    """
     logger = current_app.logger
+    
+    # Pagination parameters
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 10, type=int), 50)
-    logger.info(f"Listing novels: page={page}, per_page={per_page}")
+    
+    # Filter parameters
+    search_query = request.args.get("search", "").strip()
+    tags_filter = request.args.get("tags", "").strip()
+    status_filter = request.args.get("status", "").strip()
+    
+    # Sort parameters
+    sort_field = request.args.get("sort", "last_crawled_at").strip()
+    sort_order = request.args.get("order", "desc").strip().lower()
+    
+    logger.info(
+        f"Listing novels: page={page}, per_page={per_page}, "
+        f"search='{search_query}', tags='{tags_filter}', status='{status_filter}', "
+        f"sort={sort_field}, order={sort_order}"
+    )
+    
     try:
-        pagination = Novel.query.order_by(
-            Novel.last_crawled_at.is_(None),
-            Novel.last_crawled_at.desc(),
-            Novel.created_at.desc(),
-        ).paginate(page=page, per_page=per_page, error_out=False)
+        # Start building query
+        query = Novel.query
+        
+        # Apply title search filter
+        if search_query:
+            query = query.filter(Novel.title.ilike(f"%{search_query}%"))
+        
+        # Apply tags filter (match any of the provided tags)
+        if tags_filter:
+            tags_list = [tag.strip() for tag in tags_filter.split(",") if tag.strip()]
+            if tags_list:
+                # Match novels that contain ANY of the specified tags
+                tag_filters = [Novel.tags.ilike(f"%{tag}%") for tag in tags_list]
+                from sqlalchemy import or_
+                query = query.filter(or_(*tag_filters))
+        
+        # Apply status filter
+        if status_filter:
+            query = query.filter(Novel.status == status_filter)
+        
+        # Apply sorting
+        valid_sort_fields = {
+            "last_crawled_at": Novel.last_crawled_at,
+            "created_at": Novel.created_at,
+            "total_chapters": Novel.total_chapters,
+            "title": Novel.title,
+        }
+        
+        if sort_field in valid_sort_fields:
+            sort_column = valid_sort_fields[sort_field]
+            
+            # Handle NULL values for date fields - put them at the end
+            if sort_field in ["last_crawled_at", "created_at"]:
+                if sort_order == "asc":
+                    query = query.order_by(
+                        sort_column.is_(None),  # NULLs last
+                        sort_column.asc()
+                    )
+                else:  # desc
+                    query = query.order_by(
+                        sort_column.is_(None),  # NULLs last
+                        sort_column.desc()
+                    )
+            else:
+                # For other fields, simple sorting
+                if sort_order == "asc":
+                    query = query.order_by(sort_column.asc())
+                else:
+                    query = query.order_by(sort_column.desc())
+        else:
+            # Default sorting if invalid sort field provided
+            query = query.order_by(
+                Novel.last_crawled_at.is_(None),
+                Novel.last_crawled_at.desc(),
+                Novel.created_at.desc(),
+            )
+        
+        # Execute pagination
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
         novels_data = [
             {
                 "id": str(n.id),
@@ -394,9 +592,11 @@ def list_novels():
                 else None,
                 "created_at": n.created_at.isoformat() if n.created_at else None,
                 "cover_image_url": n.cover_image_url,
+                "description": n.description,  # Include description in list
             }
             for n in pagination.items
         ]
+        
         return jsonify(
             {
                 "novels": novels_data,
@@ -404,6 +604,13 @@ def list_novels():
                 "page": pagination.page,
                 "pages": pagination.pages,
                 "per_page": pagination.per_page,
+                "filters": {
+                    "search": search_query,
+                    "tags": tags_filter,
+                    "status": status_filter,
+                    "sort": sort_field,
+                    "order": sort_order,
+                },
             }
         )
     except Exception as e:
@@ -412,7 +619,6 @@ def list_novels():
 
 
 @app.route("/api/novels/<int:novel_id>", methods=["GET"])
-@jwt_required()
 def get_novel_details(novel_id):
     logger = current_app.logger
     logger.info(f"Fetching details for novel ID: {novel_id}")
@@ -448,7 +654,6 @@ def get_novel_details(novel_id):
 
 
 @app.route("/api/novels/<int:novel_id>/chapters", methods=["GET"])
-@jwt_required()
 def get_novel_chapters(novel_id):
     logger = current_app.logger
     page = request.args.get("page", 1, type=int)
@@ -496,7 +701,6 @@ def get_novel_chapters(novel_id):
 
 
 @app.route("/api/novels/<int:novel_id>/chapters/<int:chapter_id>", methods=["GET"])
-@jwt_required()
 def get_chapter_content(novel_id, chapter_id):
     logger = current_app.logger
     logger.info(f"Fetching content for novel {novel_id}, chapter {chapter_id}")
@@ -558,34 +762,32 @@ def get_novel_cover(novel_id):
 
 
 @app.route("/api/tasks/list", methods=["GET"])
-@jwt_required()
 def list_user_tasks():
     logger = current_app.logger
-    user_id = int(get_jwt_identity())
-    logger.info(f"Fetching task list for user ID: {user_id}")
+    logger.info("Fetching all tasks (internal API)")
     try:
         tasks = (
-            DownloadTask.query.filter_by(user_id=user_id)
+            DownloadTask.query
             .options(_db.joinedload(DownloadTask.novel))
             .order_by(DownloadTask.created_at.desc())
             .all()
         )
         return jsonify(tasks=[task.to_dict() for task in tasks])
     except Exception as e:
-        logger.error(f"Error fetching task list for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Error fetching all tasks: {e}", exc_info=True)
         return jsonify(error="Database error fetching task list"), 500
 
 
 @app.route("/api/tasks/<int:db_task_id>/terminate", methods=["POST"])
-@jwt_required()
 def terminate_task(db_task_id):
     logger = current_app.logger
-    user_id = int(get_jwt_identity())
-    logger.info(f"User {user_id} requesting termination for DB Task ID: {db_task_id}")
+    logger.info(f"Internal API requesting termination for DB Task ID: {db_task_id}")
     try:
-        task = DownloadTask.query.filter_by(id=db_task_id, user_id=user_id).first()
+        task = DownloadTask.query.filter_by(id=db_task_id).first()
         if not task:
-            return jsonify(error="Task not found or access denied"), 404
+            return jsonify(error="Task not found"), 404
+        
+        user_id = task.user_id  # Get the real user_id for WebSocket notifications
 
         if not task.celery_task_id and task.status in [
             TaskStatus.PENDING,
@@ -625,15 +827,15 @@ def terminate_task(db_task_id):
 
 
 @app.route("/api/tasks/<int:db_task_id>", methods=["DELETE"])
-@jwt_required()
 def delete_task(db_task_id):
     logger = current_app.logger
-    user_id = int(get_jwt_identity())
-    logger.info(f"User {user_id} requesting deletion for DB Task ID: {db_task_id}")
+    logger.info(f"Internal API requesting deletion for DB Task ID: {db_task_id}")
     try:
-        task = DownloadTask.query.filter_by(id=db_task_id, user_id=user_id).first()
+        task = DownloadTask.query.filter_by(id=db_task_id).first()
         if not task:
-            return jsonify(error="Task not found or access denied"), 404
+            return jsonify(error="Task not found"), 404
+        
+        user_id = task.user_id  # Get the real user_id for WebSocket notifications
 
         celery_id_to_forget = task.celery_task_id
         _db.session.delete(task)
@@ -657,15 +859,15 @@ def delete_task(db_task_id):
 
 
 @app.route("/api/tasks/<int:db_task_id>/redownload", methods=["POST"])
-@jwt_required()
 def redownload_task(db_task_id):
     logger = current_app.logger
-    user_id = int(get_jwt_identity())
-    logger.info(f"User {user_id} requesting re-download for DB Task ID: {db_task_id}")
+    logger.info(f"Internal API requesting re-download for DB Task ID: {db_task_id}")
     try:
-        task = DownloadTask.query.filter_by(id=db_task_id, user_id=user_id).first()
+        task = DownloadTask.query.filter_by(id=db_task_id).first()
         if not task:
-            return jsonify(error="Task not found or access denied"), 404
+            return jsonify(error="Task not found"), 404
+        
+        user_id = task.user_id  # Get the real user_id for notifications
 
         if task.status in [
             TaskStatus.DOWNLOADING,
@@ -726,7 +928,6 @@ def redownload_task(db_task_id):
 
 
 @app.route("/api/tasks/status/<string:task_id>", methods=["GET"])
-@jwt_required()
 def get_task_status(task_id):
     if not task_id or len(task_id) > 64 or not task_id.replace("-", "").isalnum():
         return jsonify(error="Invalid Celery task ID format"), 400
@@ -763,7 +964,6 @@ def get_task_status(task_id):
 
 # --- Stats Endpoints ---
 @app.get("/api/stats/upload")
-@jwt_required()
 def upload_stats():
     sql = """
     SELECT DATE(created_at) as d, COUNT(*) as c FROM novel
@@ -780,7 +980,6 @@ def upload_stats():
 
 
 @app.get("/api/stats/genre")
-@jwt_required()
 def genre_stats():
     sql = "SELECT tags, COUNT(*) as c FROM novel GROUP BY tags;"
     try:
@@ -799,7 +998,6 @@ def genre_stats():
 
 
 @app.get("/api/stats/wordcloud/<int:novel_id>")
-@jwt_required()
 def wordcloud_img(novel_id):
     wordcloud_dir = current_app.config.get("WORDCLOUD_SAVE_PATH")
     if not wordcloud_dir:
@@ -827,7 +1025,6 @@ def wordcloud_img(novel_id):
 
 
 @app.route("/api/novels/<int:novel_id>/download", methods=["GET"])
-@jwt_required()
 def download_novel_file(novel_id):
     logger = current_app.logger
     try:

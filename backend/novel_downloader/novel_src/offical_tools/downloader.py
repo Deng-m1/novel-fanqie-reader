@@ -97,17 +97,53 @@ class FqReq:
             "key_register_ts": "0",
         }
         headers = {"Cookie": f"install_id={self.var.install_id}"}
+        
+        # 构造完整的URL
+        from urllib.parse import urlencode
+        url = f"{API_BASE_URL}/reader/batch_full/v"
+        query_string = urlencode(params)
+        full_url = f"{url}?{query_string}"
+        
+        # 打印curl命令
+        log = GlobalContext.get_logger()
+        log.info(f"\n========== CURL Command ==========\n")
+        log.info(f"curl -X GET \"{full_url}\" \\")
+        log.info(f"  -H \"Cookie: install_id={self.var.install_id}\" \\")
+        log.info(f"  -H \"User-Agent: Mozilla/5.0\" \\")
+        log.info(f"  --insecure")
+        log.info(f"\n==================================\n")
+        
         r = self.session.get(
-            f"{API_BASE_URL}/reader/batch_full/v",
+            url,
             headers=headers,
             params=params,
             timeout=self._timeout,
             verify=False,
         )
+        
+        log.info(f"Response Status Code: {r.status_code}")
+        log.info(f"Response Content Length: {len(r.content)} bytes")
+        log.info(f"Response Headers: {dict(r.headers)}")
+        
+        if len(r.content) == 0:
+            log.error(f"API returned empty content! This usually means:")
+            log.error(f"  1. IID is invalid or expired")
+            log.error(f"  2. Chapter ID doesn't exist")
+            log.error(f"  3. API blocked the request")
+            log.error(f"Request URL: {r.url}")
+            log.error(f"Request Headers: {r.request.headers}")
+            # Return empty data structure instead of crashing
+            return {"data": {}}
+        
+        if r.status_code != 200:
+            log.error(f"Response Content: {r.text[:500]}")
+        
         r.raise_for_status()
         return r.json()
 
     def _fetch_register_key(self) -> None:
+        log = GlobalContext.get_logger()
+        log.info(f"Fetching register key...")
         static_crypto = FqCrypto(get_static_key())
         payload = {
             "content": static_crypto.build_register_content(
@@ -126,11 +162,15 @@ class FqReq:
             timeout=self._timeout,
             verify=False,
         )
+        log.info(f"Register key response status: {r.status_code}, content length: {len(r.content)}")
         r.raise_for_status()
-        data = r.json()["data"]
+        response_data = r.json()
+        log.info(f"Register key response keys: {list(response_data.keys())}")
+        data = response_data["data"]
         self._key_version = data["keyver"]
         key_hex = static_crypto.decrypt(base64.b64decode(data["key"]))
         self._crypto = FqCrypto(key_hex.hex())
+        log.info(f"Register key fetch successful, key_version: {self._key_version}")
 
     def _ensure_key_version(self, expected):
         if expected is not None and expected != self._key_version:
