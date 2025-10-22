@@ -353,8 +353,10 @@ def activate_install(install_id, tt_info):
     headers = {
         "Cookie": f"install_id={install_id}",
     }
+    # 绕过本地代理，避免 SSL 握手错误
+    proxies = {"http": None, "https": None}
     try:
-        response = requests.get(url, params=params, headers=headers)
+        response = requests.get(url, params=params, headers=headers, proxies=proxies)
         return response.status_code
     except Exception as e:
         print(f"activate_install error: {e}")
@@ -397,9 +399,11 @@ def get_iid():
             "content-type": "application/octet-stream;tt-data=a",
         }
 
+        # 绕过本地代理，避免 SSL 握手错误（Windows环境代理软件可能拦截此域名）
+        proxies = {"http": None, "https": None}
         try:
             response = requests.post(
-                url, headers=headers, data=encrypted_json, verify=False
+                url, headers=headers, data=encrypted_json, verify=False, proxies=proxies
             )
             res_data = response.json()
         except Exception as e:
